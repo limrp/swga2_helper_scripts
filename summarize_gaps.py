@@ -12,11 +12,11 @@ For each primer set:
 Usage example (step4_df style input):
 
     python summarize_gaps.py \
-      -f step4_df.csv \
-      -g Tgondii_TGA4.fasta \
-      -o tgondii_gaps \
-      -c false \
-      --step4-format
+        -f step4_df.csv \
+        -g Tgondii_TGA4.fasta \
+        -o tgondii_gaps \
+        -c false \
+        --step4-format
 """
 
 import argparse  # For command-line interface
@@ -114,6 +114,18 @@ def parse_args():
         "--step4-format",
         action="store_true",  # Becomes True when present
         help="Input is step4_df.csv style: '[p1, p2, ...], score' with no header.",
+    )
+
+    # Max F→R distance to consider in the SWGA2-style F→R metric.
+    parser.add_argument(
+        "--within-threshold",
+        type=int,
+        default=100000,
+        help=(
+            "Max forward→reverse gap to include (bp) for the SWGA2-style F→R metric. "
+            "Matches SWGA2's get_positional_gap_lengths_alternating threshold. "
+            "Default 100000."
+        ),
     )
 
     # Parse the arguments from the command line and return them.
@@ -361,7 +373,7 @@ def compute_fr_gaps(sites_sorted, L: int, circular: bool):
     Compute gaps between *converging* forward→reverse site pairs.
 
     sites_sorted: list of dicts {"pos": int, "strand": "+" or "-"},
-                  sorted by genomic position.
+                sorted by genomic position.
     L: sequence length.
     circular: if True, include wrap-around pair (last → first) using modulo.
 
@@ -416,6 +428,59 @@ def compute_fr_gaps(sites_sorted, L: int, circular: bool):
     return gaps
 
 
+def compute_fr_gaps_alternating(positions_forward, positions_reverse, threshold: int):
+    """
+    SWGA2-style F→R gaps:
+    For each forward site, find all reverse sites that are at the same or greater
+    position and at most 'threshold' bp away, and record their distances.
+
+    This mirrors the logic of optimize.get_positional_gap_lengths_alternating
+    and the manual loop in summarize_sets.py.
+
+    Parameters
+    ----------
+    positions_forward : list[int]
+        Positions (0-based) of binding sites on the forward strand.
+    positions_reverse : list[int]
+        Positions (0-based) of binding sites on the reverse strand.
+    threshold : int
+        Maximum allowed distance (bp) between F and R to be included.
+
+    Returns
+    -------
+    list[int]
+        All forward→reverse distances (in bp) that satisfy:
+        R >= F  and  R - F <= threshold.
+    """
+    # Ensure positions are sorted (SWGA2 assumes sorted lists).
+    fwd = sorted(positions_forward)
+    rev = sorted(positions_reverse)
+
+    gaps = []
+    i = j = 0
+
+    # Two-pointer scan: walk forward and reverse lists together.
+    while i < len(fwd) and j < len(rev):
+        # Move the reverse pointer until it is not behind the current forward site.
+        while j < len(rev) and rev[j] < fwd[i]:
+            j += 1
+
+        # Now try all reverse sites starting at 'j' that are within threshold.
+        sub_j = j
+        while (
+            sub_j < len(rev)
+            and rev[sub_j] - fwd[i] <= threshold
+            and rev[sub_j] >= fwd[i]
+        ):
+            gaps.append(rev[sub_j] - fwd[i])
+            sub_j += 1
+
+        # Advance to the next forward site.
+        i += 1
+
+    return gaps
+
+
 def safe_mean(lst):
     """
     Compute the mean of a list, or return NaN if the list is empty.
@@ -423,16 +488,123 @@ def safe_mean(lst):
     return sum(lst) / len(lst) if lst else math.nan
 
 
-def analyze_primer_set(primers, genome_dict, circular: bool):
+# def analyze_primer_set(primers, genome_dict, circular: bool):
+#     """
+#     Analyze one primer set over a (possibly multi-chromosome) genome.
+
+#     - genome_dict: {chrom_name: chrom_seq}
+#     - circular: treat each chromosome as circular if True, else linear.
+
+#     For each chromosome:
+#         - Find binding sites (forward + reverse).
+#         - Compute gaps (all) and F/R gaps.
+
+#     We do *not* connect chromosomes with gaps; each chromosome is independent.
+
+#     Returns:
+#         stats dict with keys:
+#             n_primers, n_chromosomes, n_chrom_with_sites,
+#             n_sites, n_gaps_all, mean_gap_all, max_gap_all,
+#             n_gaps_fr, mean_gap_fr, max_gap_fr,
+#             gaps_all, gaps_fr
+#     """
+#     # Total number of binding sites across all chromosomes.
+#     total_sites = 0
+
+#     # Total number of chromosomes in the genome.
+#     n_chromosomes = len(genome_dict)
+
+#     # Number of chromosomes that have at least one binding site.
+#     n_chrom_with_sites = 0
+
+#     # Global lists of gaps pooled across all chromosomes.
+#     global_gaps_all = []
+#     global_gaps_fr = []
+
+#     # Iterate over chromosomes in the genome.
+#     for chrom, seq in genome_dict.items():
+#         # Length of this chromosome/sequence.
+#         L = len(seq)
+
+#         # Collect all binding sites for this primer set in this chromosome.
+#         all_sites_chrom = []
+#         for pr in primers:
+#             # Find sites for each primer and accumulate them.
+#             all_sites_chrom.extend(find_sites(seq, pr))
+
+#         # If no sites on this chromosome, skip it.
+#         if not all_sites_chrom:
+#             continue
+
+#         # We found sites in this chromosome.
+#         n_chrom_with_sites += 1
+#         total_sites += len(all_sites_chrom)
+
+#         # ----- Compute "all gaps" on this chromosome -----
+#         # Extract positions only, and sort them.
+#         positions = sorted(s["pos"] for s in all_sites_chrom)
+
+#         # Compute gaps between consecutive positions (and wrap if circular).
+#         gaps_all_chrom = compute_gaps_from_positions(
+#             positions,
+#             L,
+#             circular=circular,
+#         )
+
+#         # Add to global list of "all gaps".
+#         global_gaps_all.extend(gaps_all_chrom)
+
+#         # ----- Compute "F/R gaps" on this chromosome -----
+#         # Sort sites by position, keeping strand info.
+#         sites_sorted = sorted(all_sites_chrom, key=lambda x: x["pos"])
+
+#         # Compute F/R or R/F gaps on this chromosome.
+#         gaps_fr_chrom = compute_fr_gaps(
+#             sites_sorted,
+#             L,
+#             circular=circular,
+#         )
+
+#         # Add to global list of F/R gaps.
+#         global_gaps_fr.extend(gaps_fr_chrom)
+
+#     # Build stats dictionary with global metrics.
+#     stats = {
+#         "n_primers": len(primers),
+#         "n_chromosomes": n_chromosomes,
+#         "n_chrom_with_sites": n_chrom_with_sites,
+#         "n_sites": total_sites,
+#         "n_gaps_all": len(global_gaps_all),
+#         "mean_gap_all": safe_mean(global_gaps_all),
+#         "max_gap_all": max(global_gaps_all) if global_gaps_all else math.nan,
+#         "n_gaps_fr": len(global_gaps_fr),
+#         "mean_gap_fr": safe_mean(global_gaps_fr),
+#         "max_gap_fr": max(global_gaps_fr) if global_gaps_fr else math.nan,
+#         "gaps_all": global_gaps_all,
+#         "gaps_fr": global_gaps_fr,
+#     }
+#     return stats
+
+
+def analyze_primer_set(
+    primers,
+    genome_dict,
+    circular: bool,
+    within_threshold: int,
+    set_index: int | None = None,
+    outdir: Path | None = None,
+):
     """
     Analyze one primer set over a (possibly multi-chromosome) genome.
 
     - genome_dict: {chrom_name: chrom_seq}
     - circular: treat each chromosome as circular if True, else linear.
+    - set_index, outdir: optional; if given, dump all binding sites to
+      set_{set_index:03d}_sites.csv in outdir.
 
     For each chromosome:
-        - Find binding sites (forward + reverse).
-        - Compute gaps (all) and F/R gaps.
+        - Find binding sites (forward + reverse) for each primer.
+        - Compute gaps (all) and F→R-only gaps.
 
     We do *not* connect chromosomes with gaps; each chromosome is independent.
 
@@ -456,54 +628,112 @@ def analyze_primer_set(primers, genome_dict, circular: bool):
     global_gaps_all = []
     global_gaps_fr = []
 
+    # SWGA2-style forward→reverse gaps (any F→R pair within 'within_threshold').
+    # We also track per-chromosome max F→R gaps so we can average them like swga2.
+    global_gaps_fr_within = []
+    per_chrom_max_fr_within = []
+    # global_gaps_fr_within: all F→R gaps within threshold across the genome.
+    # per_chrom_max_fr_within: one max per chromosome.
+
+    # Global list of all binding sites (for optional CSV dump).
+    # Each entry: {"chrom": name, "pos": pos, "strand": "+/-", "primer": seq}
+    all_sites_global = []
+
     # Iterate over chromosomes in the genome.
     for chrom, seq in genome_dict.items():
-        # Length of this chromosome/sequence.
         L = len(seq)
 
         # Collect all binding sites for this primer set in this chromosome.
         all_sites_chrom = []
         for pr in primers:
-            # Find sites for each primer and accumulate them.
-            all_sites_chrom.extend(find_sites(seq, pr))
+            # find_sites returns [{"pos": int, "strand": "+/-"}, ...]
+            for s in find_sites(seq, pr):
+                # Enrich each site with the primer sequence and chromosome name.
+                all_sites_chrom.append(
+                    {
+                        "chrom": chrom,
+                        "pos": s["pos"],
+                        "strand": s["strand"],
+                        "primer": pr,
+                    }
+                )
 
         # If no sites on this chromosome, skip it.
         if not all_sites_chrom:
             continue
 
-        # We found sites in this chromosome.
+        # Record that this chromosome has sites.
         n_chrom_with_sites += 1
         total_sites += len(all_sites_chrom)
 
+        # Add to global site list (for optional CSV later).
+        all_sites_global.extend(all_sites_chrom)
+
         # ----- Compute "all gaps" on this chromosome -----
-        # Extract positions only, and sort them.
         positions = sorted(s["pos"] for s in all_sites_chrom)
-
-        # Compute gaps between consecutive positions (and wrap if circular).
-        gaps_all_chrom = compute_gaps_from_positions(
-            positions,
-            L,
-            circular=circular,
-        )
-
-        # Add to global list of "all gaps".
+        gaps_all_chrom = compute_gaps_from_positions(positions, L, circular=circular)
         global_gaps_all.extend(gaps_all_chrom)
 
-        # ----- Compute "F/R gaps" on this chromosome -----
-        # Sort sites by position, keeping strand info.
+        # ----- Compute F→R gaps on this chromosome -----
         sites_sorted = sorted(all_sites_chrom, key=lambda x: x["pos"])
-
-        # Compute F/R or R/F gaps on this chromosome.
-        gaps_fr_chrom = compute_fr_gaps(
-            sites_sorted,
-            L,
-            circular=circular,
-        )
-
-        # Add to global list of F/R gaps.
+        gaps_fr_chrom = compute_fr_gaps(sites_sorted, L, circular=circular)
         global_gaps_fr.extend(gaps_fr_chrom)
 
+        # ----- SWGA2-style F→R gaps on this chromosome (any F→R within threshold) -----
+        positions_fwd = [s["pos"] for s in all_sites_chrom if s["strand"] == "+"]
+        positions_rev = [s["pos"] for s in all_sites_chrom if s["strand"] == "-"]
+
+        gaps_fr_within_chrom = compute_fr_gaps_alternating(
+            positions_fwd,
+            positions_rev,
+            threshold=within_threshold,
+        )
+
+        # Pool all F→R-within gaps across chromosomes.
+        global_gaps_fr_within.extend(gaps_fr_within_chrom)
+
+        # Track the per-chromosome max gap (to later average like swga2).
+        if gaps_fr_within_chrom:
+            per_chrom_max_fr_within.append(max(gaps_fr_within_chrom))
+
+        # with this we have
+        # - global_gaps_fr_within: the global list of all F→R distances (within threshold).
+        # - per_chrom_max_fr_within: one max gap per chromosome.
+        # ------------------------------------------------------------
+
+    # ----- Optional: dump all binding sites for this set to CSV -----
+    if set_index is not None and outdir is not None and all_sites_global:
+        import csv
+
+        sites_csv = outdir / f"set_{set_index:03d}_sites.csv"
+        # Sort for nicer viewing: by chromosome, then position.
+        all_sites_global_sorted = sorted(
+            all_sites_global, key=lambda s: (s["chrom"], s["pos"])
+        )
+        with sites_csv.open("w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["chrom", "pos", "strand", "primer"])
+            for s in all_sites_global_sorted:
+                writer.writerow([s["chrom"], s["pos"], s["strand"], s["primer"]])
+    # ----------------------------------------------------------------
+
     # Build stats dictionary with global metrics.
+
+    # SWGA2-style F→R summary:
+    # - global_gaps_fr_within: all F→R gaps within threshold across chromosomes.
+    # - per_chrom_max_fr_within: per-chromosome max F→R gaps (to average like swga2).
+    if per_chrom_max_fr_within:
+        fg_max_forward_reverse_mean_max_per_chr = sum(per_chrom_max_fr_within) / len(
+            per_chrom_max_fr_within
+        )
+    else:
+        fg_max_forward_reverse_mean_max_per_chr = math.nan
+
+    if global_gaps_fr_within:
+        fg_max_forward_reverse_global = max(global_gaps_fr_within)
+    else:
+        fg_max_forward_reverse_global = math.nan
+
     stats = {
         "n_primers": len(primers),
         "n_chromosomes": n_chromosomes,
@@ -515,6 +745,11 @@ def analyze_primer_set(primers, genome_dict, circular: bool):
         "n_gaps_fr": len(global_gaps_fr),
         "mean_gap_fr": safe_mean(global_gaps_fr),
         "max_gap_fr": max(global_gaps_fr) if global_gaps_fr else math.nan,
+        # SWGA2-style F→R gaps:
+        "n_gaps_fr_within": len(global_gaps_fr_within),
+        "mean_gap_fr_within": safe_mean(global_gaps_fr_within),
+        "fg_max_forward_reverse_mean_max_per_chr": fg_max_forward_reverse_mean_max_per_chr,
+        "fg_max_forward_reverse_global": fg_max_forward_reverse_global,
         "gaps_all": global_gaps_all,
         "gaps_fr": global_gaps_fr,
     }
@@ -545,16 +780,16 @@ def plot_for_set(idx, score, stats, outdir: Path):
         print(f"[Set {idx}] No gaps to plot (no binding sites in any chromosome).")
         return
 
-    # ----- 1) Histogram of all gaps -----
-    plt.figure()
-    plt.hist(gaps_all, bins=20)
-    plt.xlabel("Gap length (bp)")
-    plt.ylabel("Count")
-    plt.title(f"Set {idx}: all gaps (global; score={score})")
-    plt.tight_layout()
-    # Example filename: set_001_hist_all.png
-    plt.savefig(outdir / f"set_{idx:03d}_hist_all.png")
-    plt.close()
+    # # ----- 1) Histogram of all gaps -----
+    # plt.figure()
+    # plt.hist(gaps_all, bins=20)
+    # plt.xlabel("Gap length (bp)")
+    # plt.ylabel("Count")
+    # plt.title(f"Set {idx}: all gaps (global; score={score})")
+    # plt.tight_layout()
+    # # Example filename: set_001_hist_all.png
+    # plt.savefig(outdir / f"set_{idx:03d}_hist_all.png")
+    # plt.close()
 
     # ----- 2) Histogram: all gaps vs F/R-only gaps -----
     plt.figure()
@@ -571,19 +806,19 @@ def plot_for_set(idx, score, stats, outdir: Path):
     plt.savefig(outdir / f"set_{idx:03d}_hist_all_vs_fr.png")
     plt.close()
 
-    # ----- 3) Sorted gaps (all gaps) -----
-    # Sort gaps from smallest to largest.
-    gaps_sorted = sorted(gaps_all)
+    # # ----- 3) Sorted gaps (all gaps) -----
+    # # Sort gaps from smallest to largest.
+    # gaps_sorted = sorted(gaps_all)
 
-    plt.figure()
-    # x-axis is the rank (1, 2, ..., n), y-axis is the sorted gap length.
-    plt.plot(range(1, len(gaps_sorted) + 1), gaps_sorted, marker="o")
-    plt.xlabel("Gap rank (small → large)")
-    plt.ylabel("Gap length (bp)")
-    plt.title(f"Set {idx:03d}: sorted gaps (global; score={score})")
-    plt.tight_layout()
-    plt.savefig(outdir / f"set_{idx:03d}_sorted_gaps.png")
-    plt.close()
+    # plt.figure()
+    # # x-axis is the rank (1, 2, ..., n), y-axis is the sorted gap length.
+    # plt.plot(range(1, len(gaps_sorted) + 1), gaps_sorted, marker="o")
+    # plt.xlabel("Gap rank (small → large)")
+    # plt.ylabel("Gap length (bp)")
+    # plt.title(f"Set {idx:03d}: sorted gaps (global; score={score})")
+    # plt.tight_layout()
+    # plt.savefig(outdir / f"set_{idx:03d}_sorted_gaps.png")
+    # plt.close()
 
 
 # ===========================
@@ -643,7 +878,11 @@ def main():
             primers=primers,
             genome_dict=genome_dict,
             circular=args.circular,
+            within_threshold=args.within_threshold,
+            set_index=idx,
+            outdir=outdir,
         )
+
         # ---- DEBUG: inspect F→R gaps for a specific set ----
         if idx == 1:  # change 1 to 2,3,... to debug another set
             gaps_fr = stats["gaps_fr"]
@@ -668,7 +907,14 @@ def main():
             "n_gaps_fr": stats["n_gaps_fr"],
             "mean_gap_fr": stats["mean_gap_fr"],
             "max_gap_fr": stats["max_gap_fr"],
+            "n_gaps_fr_within": stats["n_gaps_fr_within"],
+            "mean_gap_fr_within": stats["mean_gap_fr_within"],
+            "fg_max_forward_reverse_mean_max_per_chr": stats[
+                "fg_max_forward_reverse_mean_max_per_chr"
+            ],
+            "fg_max_forward_reverse_global": stats["fg_max_forward_reverse_global"],
         }
+
         results.append(stats_row)
 
         # Generate plots for this primer set (global across chromosomes).
