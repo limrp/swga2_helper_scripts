@@ -19,17 +19,17 @@ Usage example (step4_df style input):
       --step4-format
 """
 
-import argparse           # For command-line interface
-import math               # For NaN, mean, etc.
+import argparse  # For command-line interface
+import math  # For NaN, mean, etc.
 from pathlib import Path  # For filesystem paths in an OS-independent way
 
 import matplotlib.pyplot as plt  # For plots
-import pandas as pd              # For generic CSV reading
-
+import pandas as pd  # For generic CSV reading
 
 # ===========================
 # CLI helpers
 # ===========================
+
 
 def str_to_bool(v):
     """
@@ -124,6 +124,7 @@ def parse_args():
 # FASTA + primer parsing
 # ===========================
 
+
 def load_fasta_dict(path: Path):
     """
     Load a (multi-)FASTA file into a dictionary: {seq_name: sequence}.
@@ -132,9 +133,9 @@ def load_fasta_dict(path: Path):
       up to the first whitespace.
     - The sequence is returned as an uppercase string with newlines removed.
     """
-    sequences = {}      # Will store {name: sequence}
-    name = None         # Current sequence name
-    seq_chunks = []     # List of lines for the current sequence
+    sequences = {}  # Will store {name: sequence}
+    name = None  # Current sequence name
+    seq_chunks = []  # List of lines for the current sequence
 
     # Open the FASTA file for reading.
     with path.open() as f:
@@ -357,17 +358,16 @@ def compute_gaps_from_positions(positions, L: int, circular: bool):
 
 def compute_fr_gaps(sites_sorted, L: int, circular: bool):
     """
-    Compute gaps only between consecutive binding sites where strand changes.
+    Compute gaps between *converging* forward→reverse site pairs.
 
-    - sites_sorted: list of {"pos": ..., "strand": ...} sorted by position.
-    - L: length of the sequence.
-    - circular: if True, also consider the pair (last_site -> first_site).
+    sites_sorted: list of dicts {"pos": int, "strand": "+" or "-"},
+                  sorted by genomic position.
+    L: sequence length.
+    circular: if True, include wrap-around pair (last → first) using modulo.
 
-    We only keep gaps where the strand is different between the two sites:
-      "+" -> "-"  or  "-" -> "+"
-
-    Returns:
-        list of gap lengths (integers).
+    Only keep gaps where:
+        upstream site is "+" (forward) and downstream site is "-" (reverse),
+    i.e. a converging forward→reverse pair.
     """
     n = len(sites_sorted)
 
@@ -377,8 +377,8 @@ def compute_fr_gaps(sites_sorted, L: int, circular: bool):
 
     gaps = []  # List to store F/R or R/F gap lengths
 
-    # For circular sequences, we consider the pair (i, (i+1) % n) for all i.
-    # For linear sequences, we consider pairs (i, i+1) for i = 0..n-2.
+    # For circular sequences, inspect (i, (i+1) % n) for all i.
+    # For linear sequences, inspect (i, i+1) for i = 0..n-2.
     if circular:
         indices = range(n)
     else:
@@ -392,7 +392,12 @@ def compute_fr_gaps(sites_sorted, L: int, circular: bool):
         s_i = sites_sorted[i]
         s_j = sites_sorted[j]
 
-        # Compute distance along the sequence between s_i and s_j.
+        # We only care about converging forward→reverse:
+        # upstream "+" (forward), downstream "-" (reverse)
+        if not (s_i["strand"] == "+" and s_j["strand"] == "-"):
+            continue
+
+        # Compute genomic distance from upstream F to downstream R
         if circular:
             # Use modulo to handle wrap-around.
             gap = (s_j["pos"] - s_i["pos"]) % L
@@ -400,9 +405,13 @@ def compute_fr_gaps(sites_sorted, L: int, circular: bool):
             # For linear case, j > i so just subtract.
             gap = s_j["pos"] - s_i["pos"]
 
-        # Keep this gap only if strand changes between these sites.
-        if s_i["strand"] != s_j["strand"]:
-            gaps.append(gap)
+        gaps.append(gap)
+
+        # DEBUG
+        # DEBUG: now runs once for each F→R gap
+        print(
+            f"[DEBUG F→R] {s_i['pos']}({s_i['strand']}) -> {s_j['pos']}({s_j['strand']}), gap = {gap}"
+        )
 
     return gaps
 
@@ -422,17 +431,17 @@ def analyze_primer_set(primers, genome_dict, circular: bool):
     - circular: treat each chromosome as circular if True, else linear.
 
     For each chromosome:
-      - Find binding sites (forward + reverse).
-      - Compute gaps (all) and F/R gaps.
+        - Find binding sites (forward + reverse).
+        - Compute gaps (all) and F/R gaps.
 
     We do *not* connect chromosomes with gaps; each chromosome is independent.
 
     Returns:
         stats dict with keys:
-          n_primers, n_chromosomes, n_chrom_with_sites,
-          n_sites, n_gaps_all, mean_gap_all, max_gap_all,
-          n_gaps_fr, mean_gap_fr, max_gap_fr,
-          gaps_all, gaps_fr
+            n_primers, n_chromosomes, n_chrom_with_sites,
+            n_sites, n_gaps_all, mean_gap_all, max_gap_all,
+            n_gaps_fr, mean_gap_fr, max_gap_fr,
+            gaps_all, gaps_fr
     """
     # Total number of binding sites across all chromosomes.
     total_sites = 0
@@ -516,6 +525,7 @@ def analyze_primer_set(primers, genome_dict, circular: bool):
 # Plotting
 # ===========================
 
+
 def plot_for_set(idx, score, stats, outdir: Path):
     """
     Generate plots for one primer set:
@@ -580,6 +590,7 @@ def plot_for_set(idx, score, stats, outdir: Path):
 # Main entry point
 # ===========================
 
+
 def main():
     """
     Main function:
@@ -633,6 +644,15 @@ def main():
             genome_dict=genome_dict,
             circular=args.circular,
         )
+        # ---- DEBUG: inspect F→R gaps for a specific set ----
+        if idx == 1:  # change 1 to 2,3,... to debug another set
+            gaps_fr = stats["gaps_fr"]
+            print(f"[DEBUG] Set {idx}: F→R gaps ({len(gaps_fr)} total):")
+            print(gaps_fr)
+            if gaps_fr:
+                print(f"[DEBUG] max(gaps_fr) = {max(gaps_fr)}")
+                print(f"[DEBUG] stats['max_gap_fr'] = {stats['max_gap_fr']}")
+        # ---- END DEBUG ----
 
         # Build a "flat" summary row (no lists, only scalar numbers).
         stats_row = {
@@ -671,4 +691,3 @@ def main():
 # Run main() when the script is executed as a program.
 if __name__ == "__main__":
     main()
-
